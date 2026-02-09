@@ -1,0 +1,13 @@
+.venv/
+.local/
+.env
+__pycache__/
+.mypy_cache/
+.ruff_cache/
+dist/
+node_modules/
+.docs_ru
+.superpowers/
+.coverage
+.cursor/
+.pytest_cache/
