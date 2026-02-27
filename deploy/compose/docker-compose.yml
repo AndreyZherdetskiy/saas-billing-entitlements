@@ -1,0 +1,509 @@
+# Project name = container/network prefix. Without this, Compose uses parent dir ("compose").
+name: billing-platform
+
+# Profiles / DSN how-to: docs/runbooks/local-compose-profiles.md
+x-app-env: &app-env
+  DATABASE_URL: ${DATABASE_URL}
+  # RO DSN when using profile postgres-replica — docs/runbooks/replica-lag.md
+  DATABASE_READ_URL: ${DATABASE_READ_URL:-}
+  # Process pool; point DATABASE_URL at pgbouncer when using that profile — docs/runbooks/pgbouncer-pools.md
+  DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-20}
+  DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-10}
+  REPLICA_LAG_THRESHOLD_SECONDS: ${REPLICA_LAG_THRESHOLD_SECONDS:-30}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+  ENTITLEMENT_CACHE_TTL_SECONDS: ${ENTITLEMENT_CACHE_TTL_SECONDS:-60}
+  OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
+  OUTBOX_MAX_ATTEMPTS: ${OUTBOX_MAX_ATTEMPTS:-10}
+  WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS: ${WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS:-300}
+  MOCK_STRIPE_WEBHOOK_SECRET: ${MOCK_STRIPE_WEBHOOK_SECRET}
+  API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-120}
+  API_RATE_LIMIT_PLATFORM_ADMIN_PER_MINUTE: ${API_RATE_LIMIT_PLATFORM_ADMIN_PER_MINUTE:-1000}
+  RECONCILIATION_ALERT_AMOUNT_CENTS: ${RECONCILIATION_ALERT_AMOUNT_CENTS:-10000}
+  GRACE_ENFORCEMENT_INTERVAL_SECONDS: ${GRACE_ENFORCEMENT_INTERVAL_SECONDS:-60}
+  DUNNING_ENABLED: ${DUNNING_ENABLED:-false}
+  MOCK_STRIPE_BASE_URL: ${MOCK_STRIPE_BASE_URL:-http://mock-stripe:8001}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-billing-platform}
+  # Default off for clone/k6; make observability-up enables OTLP — docs/perf/README.md
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
+  HEALTH_KAFKA_OPTIONAL: ${HEALTH_KAFKA_OPTIONAL:-false}
+  SHUTDOWN_GRACE_SECONDS: ${SHUTDOWN_GRACE_SECONDS:-30}
+
+services:
+  postgres:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.postgres
+    image: local/billing-platform-postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-billing}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-billing}
+      POSTGRES_DB: ${POSTGRES_DB:-billing}
+      POSTGRES_REPLICATION_USER: ${POSTGRES_REPLICATION_USER:-replicator}
+      POSTGRES_REPLICATION_PASSWORD: ${POSTGRES_REPLICATION_PASSWORD}
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=3
+      - -c
+      - hot_standby=on
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-billing} -d ${POSTGRES_DB:-billing}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Optional RO replica — docs/runbooks/local-compose-profiles.md + replica-lag.md
+  postgres-replica:
+    profiles:
+      - postgres-replica
+    image: postgres:16.15
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-billing}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-billing}
+      POSTGRES_DB: ${POSTGRES_DB:-billing}
+      POSTGRES_PRIMARY_HOST: postgres
+      POSTGRES_REPLICATION_USER: ${POSTGRES_REPLICATION_USER:-replicator}
+      POSTGRES_REPLICATION_PASSWORD: ${POSTGRES_REPLICATION_PASSWORD}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-replica-data:/var/lib/postgresql/data
+      - ./postgres-replica/replica-entrypoint.sh:/usr/local/bin/replica-entrypoint.sh:ro
+    entrypoint: ["/usr/local/bin/replica-entrypoint.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-billing} -d ${POSTGRES_DB:-billing}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  # Primary pooler — docs/runbooks/pgbouncer-pools.md (profile does not rewrite DATABASE_URL)
+  pgbouncer:
+    profiles:
+      - pgbouncer
+      - stage3
+    image: edoburu/pgbouncer:1.22.1-p0
+    ports:
+      - "6432:5432"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      AUTH_FILE: /tmp/pgbouncer-userlist.txt
+      AUTH_TYPE: plain
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # 127.0.0.1: localhost→::1 fails nc; unix socket is under /tmp in this image
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5432 || test -S /tmp/.s.PGSQL.5432"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # RO pooler (needs postgres-replica) — docs/runbooks/pgbouncer-pools.md
+  pgbouncer-replica:
+    profiles:
+      - pgbouncer-replica
+    image: edoburu/pgbouncer:1.22.1-p0
+    ports:
+      - "6433:5432"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-replica:5432/${POSTGRES_DB}
+      AUTH_FILE: /tmp/pgbouncer-userlist.txt
+      AUTH_TYPE: plain
+    volumes:
+      - ./pgbouncer/pgbouncer-replica.ini:/etc/pgbouncer/pgbouncer.ini:ro
+    depends_on:
+      postgres-replica:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5432 || test -S /tmp/.s.PGSQL.5432"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:8.10
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:4.3.1
+    hostname: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  kafka-init:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.kafka-init
+    image: local/billing-platform-kafka-init:4.3.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    restart: "no"
+
+  kafbat-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.5.0
+    ports:
+      - "${KAFBAT_UI_PORT:-8081}:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:8080/actuator/health 2>/dev/null | grep -q '\"status\":\"UP\"' || curl -sf http://localhost:8080/actuator/health | grep -q UP",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  mock-stripe:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mock-stripe
+    ports:
+      - "8001:8001"
+    environment:
+      MOCK_STRIPE_WEBHOOK_SECRET: ${MOCK_STRIPE_WEBHOOK_SECRET}
+      WEBHOOK_CALLBACK_URL: ${WEBHOOK_CALLBACK_URL:-http://billing-api:8000/v1/webhooks/mock-stripe}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  billing-api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-billing-api}
+      # Auto-migrate + deterministic demo seed on start — docs/runbooks/local-compose-profiles.md
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+      RUN_DEMO_SEED: ${RUN_DEMO_SEED:-true}
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
+    command:
+      [
+        "sh",
+        "-c",
+        "uvicorn billing_platform.main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-1} --timeout-graceful-shutdown ${SHUTDOWN_GRACE_SECONDS:-30}",
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      mock-stripe:
+        condition: service_healthy
+    # Compose: one healthcheck; Helm splits live/ready probes
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')\""]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+
+  billing-worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.worker
+    command:
+      [
+        "celery",
+        "-A",
+        "billing_platform.workers.celery_app",
+        "worker",
+        "--loglevel=info",
+        "-Q",
+        "billing",
+      ]
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-billing-worker}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      billing-api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A billing_platform.workers.celery_app inspect ping -d celery@$$(hostname)",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # No healthcheck: scheduler only (probes live on worker)
+  billing-beat:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.worker
+    command:
+      [
+        "celery",
+        "-A",
+        "billing_platform.workers.celery_app",
+        "beat",
+        "--loglevel=info",
+      ]
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-billing-beat}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      billing-api:
+        condition: service_healthy
+
+  outbox-relay:
+    # HA: docker compose up --scale outbox-relay=2
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.outbox-relay
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-outbox-relay}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      billing-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os, signal; os.kill(1, 0)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  demo-ui:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.demo-ui
+    ports:
+      - "8080:8080"
+    environment:
+      # Defaults = billing_platform.bootstrap.demo_seed constants (override via .env).
+      DEMO_UI_API_BASE_URL: ${DEMO_UI_API_BASE_URL:-}
+      DEMO_UI_API_KEY: ${DEMO_UI_API_KEY:-bp_local_demo_platform_admin_key_v1}
+      DEMO_UI_PLATFORM_ADMIN_API_KEY: ${DEMO_UI_PLATFORM_ADMIN_API_KEY:-bp_local_demo_platform_admin_key_v1}
+      DEMO_UI_ORG_ID: ${DEMO_UI_ORG_ID:-01900000-0000-7000-8000-000000000001}
+      DEMO_UI_FEATURE_KEYS: ${DEMO_UI_FEATURE_KEYS:-api_calls,seats}
+    depends_on:
+      billing-api:
+        condition: service_healthy
+
+  # Opt-in LGTP — configs baked into images (no host bind-mounts)
+  alloy:
+    profiles:
+      - observability
+    build:
+      context: ../..
+      dockerfile: deploy/compose/alloy/Dockerfile
+    image: local/billing-platform-alloy:v1.7.5
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - alloy-data:/var/lib/alloy/data
+    mem_limit: 512m
+    depends_on:
+      tempo:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      # Alloy image has no curl/wget; probe OTLP HTTP port via bash /dev/tcp.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/4318'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  tempo:
+    profiles:
+      - observability
+    build:
+      context: ../..
+      dockerfile: deploy/compose/tempo/Dockerfile
+    image: local/billing-platform-tempo:2.6.1
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - tempo-data:/var/tempo
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3200/ready 2>/dev/null | grep -q ready || curl -sf http://localhost:3200/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  loki:
+    profiles:
+      - observability
+    build:
+      context: ../..
+      dockerfile: deploy/compose/loki/Dockerfile
+    image: local/billing-platform-loki:3.3.2
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - loki-data:/loki
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready 2>/dev/null | grep -q ready || curl -sf http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  prometheus:
+    profiles:
+      - observability
+    build:
+      context: ../..
+      dockerfile: deploy/compose/prometheus/Dockerfile
+    image: local/billing-platform-prometheus:v3.2.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=72h
+      - --web.enable-remote-write-receiver
+      - --web.enable-lifecycle
+    volumes:
+      - prometheus-data:/prometheus
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  grafana:
+    profiles:
+      - observability
+    build:
+      context: ../..
+      dockerfile: deploy/compose/grafana/Dockerfile
+    image: local/billing-platform-grafana:11.5.2
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    mem_limit: 256m
+    depends_on:
+      tempo:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health 2>/dev/null | grep -q ok || curl -sf http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  postgres-data:
+    name: billing-platform-postgres-data
+  postgres-replica-data:
+    name: billing-platform-postgres-replica-data
+  alloy-data:
+    name: billing-platform-alloy-data
+  tempo-data:
+    name: billing-platform-tempo-data
+  loki-data:
+    name: billing-platform-loki-data
+  prometheus-data:
+    name: billing-platform-prometheus-data
+  grafana-data:
+    name: billing-platform-grafana-data
+
+networks:
+  default:
+    name: billing-platform
