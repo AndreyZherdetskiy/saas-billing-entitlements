@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "billing-platform.fullname" . }}-api
+  labels:
+    {{- include "billing-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.replicaCount.api }}
+  selector:
+    matchLabels:
+      {{- include "billing-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "billing-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      {{- include "billing-platform.podSecurityContext" . | nindent 6 }}
+      containers:
+        - name: api
+          {{- include "billing-platform.containerSecurityContext" . | nindent 10 }}
+          image: {{ include "billing-platform.image" (list . .Values.image.tags.api) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.containerPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "billing-platform.configMapName" . }}
+            - secretRef:
+                name: {{ include "billing-platform.secretName" . }}
+          {{- include "billing-platform.apiLivenessProbe" . | nindent 10 }}
+          {{- include "billing-platform.apiReadinessProbe" . | nindent 10 }}
