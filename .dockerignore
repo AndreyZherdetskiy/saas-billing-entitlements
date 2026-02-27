@@ -1,0 +1,15 @@
+.git
+.venv
+.local
+.docs_ru
+.superpowers
+.cursor
+.env
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+demo_ui/node_modules
+demo_ui/dist
+node_modules
