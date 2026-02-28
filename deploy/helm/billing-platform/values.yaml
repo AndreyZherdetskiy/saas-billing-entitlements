@@ -1,0 +1,121 @@
+# Local / kind images — load with `kind load docker-image` (no registry push).
+replicaCount:
+  api: 2
+  worker: 1
+  beat: 1
+  relay: 2  # HA relay (ADR-004 amendment)
+
+image:
+  repository: local/billing-platform
+  pullPolicy: IfNotPresent
+  tags:
+    api: api
+    worker: worker
+    outboxRelay: outbox-relay
+
+# Non-secret app configuration (placeholders; override at install time).
+config:
+  REDIS_URL: redis://redis:6379/0
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  ENTITLEMENT_CACHE_TTL_SECONDS: "60"
+  OUTBOX_BATCH_SIZE: "100"
+  OUTBOX_MAX_ATTEMPTS: "10"
+  WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS: "300"
+  API_RATE_LIMIT_PER_MINUTE: "120"
+  API_RATE_LIMIT_PLATFORM_ADMIN_PER_MINUTE: "1000"
+  RECONCILIATION_ALERT_AMOUNT_CENTS: "10000"
+  GRACE_ENFORCEMENT_INTERVAL_SECONDS: "60"
+  DUNNING_ENABLED: "false"
+  MOCK_STRIPE_BASE_URL: http://mock-stripe:8001
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  OTEL_SDK_DISABLED: ""
+  SHUTDOWN_GRACE_SECONDS: "30"
+  HEALTH_KAFKA_OPTIONAL: ""
+  REPLICA_LAG_THRESHOLD_SECONDS: "30"
+  DATABASE_POOL_SIZE: "20"
+  DATABASE_MAX_OVERFLOW: "10"
+
+# PgBouncer stub — not deployed by this chart yet; wire external Service or subchart.
+pgbouncer:
+  enabled: false
+  image:
+    repository: edoburu/pgbouncer
+    tag: 1.22.1-p0
+  poolMode: session
+  maxClientConn: 200
+  defaultPoolSize: 25
+  minPoolSize: 5
+  service:
+    port: 6432
+  # When enabled in a future chart revision, point secrets.DATABASE_URL at pgbouncer Service.
+  replica:
+    enabled: false
+    maxClientConn: 100
+    defaultPoolSize: 15
+    service:
+      port: 6433
+
+# Secret keys — empty placeholders only; inject real values via --set-file / external Secret.
+secrets:
+  DATABASE_URL: ""
+  DATABASE_READ_URL: ""
+  MOCK_STRIPE_WEBHOOK_SECRET: ""
+  MOCK_STRIPE_WEBHOOK_SECRET_PREVIOUS: ""
+
+api:
+  containerPort: 8000
+
+# Matches UID/GID created in deploy/docker/Dockerfile.{api,worker,outbox-relay}.
+securityContext:
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+worker:
+  queue: billing
+
+# Liveness/readiness — api uses HTTP (§8.6); worker/relay use exec (no HTTP listener).
+probes:
+  api:
+    liveness:
+      path: /health/live
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      path: /health/ready
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+  worker:
+    liveness:
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 3
+    readiness:
+      initialDelaySeconds: 15
+      periodSeconds: 15
+      timeoutSeconds: 10
+      failureThreshold: 3
+  relay:
+    liveness:
+      initialDelaySeconds: 15
+      periodSeconds: 15
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+# HPA stub for api — requires metrics-server in cluster (kind/minikube: enable addon).
+hpa:
+  enabled: true
+  api:
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
