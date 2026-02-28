@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "billing-platform.fullname" . }}-outbox-relay
+  labels:
+    {{- include "billing-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: outbox-relay
+spec:
+  replicas: {{ .Values.replicaCount.relay }}
+  selector:
+    matchLabels:
+      {{- include "billing-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: outbox-relay
+  template:
+    metadata:
+      labels:
+        {{- include "billing-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: outbox-relay
+    spec:
+      {{- include "billing-platform.podSecurityContext" . | nindent 6 }}
+      containers:
+        - name: outbox-relay
+          {{- include "billing-platform.containerSecurityContext" . | nindent 10 }}
+          image: {{ include "billing-platform.image" (list . .Values.image.tags.outboxRelay) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - -m
+            - billing_platform.outbox_relay
+          envFrom:
+            - configMapRef:
+                name: {{ include "billing-platform.configMapName" . }}
+            - secretRef:
+                name: {{ include "billing-platform.secretName" . }}
+          {{- include "billing-platform.relayLivenessProbe" . | nindent 10 }}
+          {{- include "billing-platform.relayReadinessProbe" . | nindent 10 }}
