@@ -1,0 +1,59 @@
+groups:
+  - name: billing_slo
+    rules:
+      - alert: OutboxLagHigh
+        expr: billing_platform_slo_outbox_lag_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+          priority: P2
+        annotations:
+          summary: Outbox publish lag exceeds 300s
+          description: |
+            outbox_lag_seconds > 300 for 5m.
+            Runbook: docs/runbooks/outbox-lag.md
+
+      - alert: EntitlementLatency
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(billing_platform_slo_entitlement_evaluate_duration_seconds_bucket[5m]))
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          priority: P3
+        annotations:
+          summary: Entitlement evaluate p99 latency > 100ms
+          description: |
+            p99 entitlement_evaluate_duration_seconds > 100ms for 5m.
+            Runbook: docs/runbooks/entitlement-latency.md
+
+      - alert: ReconMismatch
+        expr: billing_platform_slo_reconciliation_discrepancy_amount_cents > 10000
+        for: 5m
+        labels:
+          severity: warning
+          priority: P3
+        annotations:
+          summary: Reconciliation discrepancy amount exceeds $100
+          description: |
+            reconciliation_discrepancy_amount_cents > 10000 for 5m.
+            Runbook: docs/runbooks/reconciliation-mismatch.md
+
+      - alert: WebhookFailRate
+        expr: |
+          (
+            sum(rate(traces_spanmetrics_calls_total{span_name="webhook.process", status_code="STATUS_CODE_ERROR"}[15m]))
+            /
+            clamp_min(sum(rate(traces_spanmetrics_calls_total{span_name="webhook.process"}[15m])), 1e-9)
+          ) > 0.01
+        for: 15m
+        labels:
+          severity: warning
+          priority: P2
+        annotations:
+          summary: Webhook process error rate > 1%
+          description: |
+            ERROR share of webhook.process spanmetrics > 1% over 15m.
+            Runbook: docs/runbooks/webhook-replay.md
