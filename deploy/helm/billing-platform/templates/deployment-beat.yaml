@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "billing-platform.fullname" . }}-beat
+  labels:
+    {{- include "billing-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: beat
+spec:
+  replicas: {{ .Values.replicaCount.beat }}
+  selector:
+    matchLabels:
+      {{- include "billing-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: beat
+  template:
+    metadata:
+      labels:
+        {{- include "billing-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: beat
+    spec:
+      {{- include "billing-platform.podSecurityContext" . | nindent 6 }}
+      containers:
+        - name: beat
+          {{- include "billing-platform.containerSecurityContext" . | nindent 10 }}
+          image: {{ include "billing-platform.image" (list . .Values.image.tags.worker) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - celery
+            - -A
+            - billing_platform.workers.celery_app
+            - beat
+            - --loglevel=info
+          envFrom:
+            - configMapRef:
+                name: {{ include "billing-platform.configMapName" . }}
+            - secretRef:
+                name: {{ include "billing-platform.secretName" . }}
