@@ -1,0 +1,6 @@
+FROM postgres:16.15
+
+COPY deploy/compose/postgres-replica/pg_hba.conf /etc/postgresql/pg_hba.conf
+COPY deploy/compose/postgres-replica/init-replication.sh /docker-entrypoint-initdb.d/10-init-replication.sh
+RUN chmod 644 /etc/postgresql/pg_hba.conf \
+    && chmod 755 /docker-entrypoint-initdb.d/10-init-replication.sh
