@@ -1,0 +1,8 @@
+FROM apache/kafka:4.3.1
+
+USER root
+COPY deploy/compose/init-kafka-topics.sh /init-kafka-topics.sh
+RUN chmod 755 /init-kafka-topics.sh
+USER 1000
+
+ENTRYPOINT ["/bin/bash", "/init-kafka-topics.sh"]
