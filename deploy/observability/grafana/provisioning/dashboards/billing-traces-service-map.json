@@ -1,0 +1,160 @@
+{
+  "annotations": { "list": [] },
+  "description": "Deep-dive: error TraceQL, service map, top noisy / failing spans. Pair with Billing SLO Overview.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "panels": [],
+      "title": "Service map",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "description": "Explore → Tempo → Service Graph uses the same Prometheus metrics.",
+      "gridPos": { "h": 16, "w": 24, "x": 0, "y": 1 },
+      "id": 2,
+      "targets": [
+        {
+          "queryType": "serviceMap",
+          "refId": "A"
+        }
+      ],
+      "title": "Service graph",
+      "type": "nodeGraph"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "id": 3,
+      "panels": [],
+      "title": "Error traces",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 18 },
+      "id": 4,
+      "targets": [
+        {
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "query": "{ status = error }"
+        }
+      ],
+      "title": "All ERROR traces",
+      "type": "traces"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 28 },
+      "id": 5,
+      "targets": [
+        {
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "query": "{ resource.service.name = \"billing-api\" && status = error }"
+        }
+      ],
+      "title": "billing-api ERROR traces",
+      "type": "traces"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 28 },
+      "id": 6,
+      "targets": [
+        {
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "query": "{ name =~ \"webhook\\\\.process|reconciliation\\\\.run|dunning\\\\.attempt|outbox\\\\.relay\\\\.batch\" }"
+        }
+      ],
+      "title": "Critical billing spans",
+      "type": "traces"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
+      "id": 7,
+      "panels": [],
+      "title": "Top spans (Prometheus)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 39 },
+      "id": 8,
+      "options": {
+        "displayMode": "lcd",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (service, span_name) (rate(traces_spanmetrics_calls_total{status_code=\"STATUS_CODE_ERROR\"}[15m])))",
+          "legendFormat": "{{service}} / {{span_name}}",
+          "format": "time_series",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Top ERROR spans (15m)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 39 },
+      "id": 9,
+      "options": {
+        "displayMode": "lcd",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (client, server) (rate(traces_service_graph_request_total[15m])))",
+          "legendFormat": "{{client}} → {{server}}",
+          "format": "time_series",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Top service-graph edges (15m)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 48 },
+      "id": 10,
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] } },
+      "targets": [
+        {
+          "expr": "sum by (span_name, status_code) (rate(traces_spanmetrics_calls_total{service=\"billing-api\"}[5m]))",
+          "legendFormat": "{{span_name}} ({{status_code}})",
+          "refId": "A"
+        }
+      ],
+      "title": "billing-api span mix",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["billing", "tempo", "traces", "service-graph", "lgtp"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Billing Traces & Service Map",
+  "uid": "billing-traces-service-map",
+  "version": 1
+}
