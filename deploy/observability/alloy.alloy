@@ -1,0 +1,160 @@
+// LGTP gateway: OTLP in → filter → memory_limiter → batch → tail_sampling → backends.
+// See deploy/observability/README.md for retention/sampling table.
+
+logging {
+	level  = "info"
+	format = "logfmt"
+}
+
+otelcol.receiver.otlp "default" {
+	grpc {
+		endpoint = "0.0.0.0:4317"
+	}
+	http {
+		endpoint = "0.0.0.0:4318"
+	}
+
+	output {
+		traces  = [otelcol.processor.filter.drop_health.input]
+		metrics = [otelcol.processor.batch.metrics.input]
+		logs    = [otelcol.processor.batch.logs.input]
+	}
+}
+
+otelcol.processor.filter "drop_health" {
+	error_mode = "ignore"
+
+	traces {
+		span = [
+			`attributes["url.path"] == "/health/live"`,
+			`attributes["url.path"] == "/health/ready"`,
+			`attributes["http.target"] == "/health/live"`,
+			`attributes["http.target"] == "/health/ready"`,
+			`IsMatch(name, ".*/health/live.*")`,
+			`IsMatch(name, ".*/health/ready.*")`,
+		]
+	}
+
+	output {
+		traces = [otelcol.processor.memory_limiter.default.input]
+	}
+}
+
+otelcol.processor.memory_limiter "default" {
+	check_interval         = "1s"
+	limit_percentage       = 80
+	spike_limit_percentage = 25
+
+	output {
+		traces = [otelcol.processor.batch.traces.input]
+	}
+}
+
+otelcol.processor.batch "traces" {
+	timeout             = "1s"
+	send_batch_size     = 512
+	send_batch_max_size = 1024
+
+	output {
+		traces = [otelcol.processor.tail_sampling.default.input]
+	}
+}
+
+otelcol.processor.batch "metrics" {
+	timeout         = "1s"
+	send_batch_size = 512
+
+	output {
+		metrics = [otelcol.exporter.prometheus.default.input]
+	}
+}
+
+otelcol.processor.batch "logs" {
+	timeout         = "1s"
+	send_batch_size = 512
+
+	output {
+		logs = [otelcol.exporter.loki.default.input]
+	}
+}
+
+otelcol.processor.tail_sampling "default" {
+	decision_wait               = "8s"
+	num_traces                  = 50000
+	expected_new_traces_per_sec = 100
+
+	policy {
+		name = "errors"
+		type = "status_code"
+
+		status_code {
+			status_codes = ["ERROR"]
+		}
+	}
+
+	policy {
+		name = "latency"
+		type = "latency"
+
+		latency {
+			threshold_ms = 100
+		}
+	}
+
+	policy {
+		name = "critical-billing-spans"
+		type = "ottl_condition"
+
+		ottl_condition {
+			error_mode = "ignore"
+			span = [
+				`name == "webhook.process"`,
+				`name == "outbox.relay.batch"`,
+				`name == "reconciliation.run"`,
+				`name == "dunning.attempt"`,
+			]
+		}
+	}
+
+	policy {
+		name = "probabilistic"
+		type = "probabilistic"
+
+		probabilistic {
+			sampling_percentage = 5
+		}
+	}
+
+	output {
+		traces = [otelcol.exporter.otlp.tempo.input]
+	}
+}
+
+otelcol.exporter.otlp "tempo" {
+	client {
+		endpoint = "tempo:4317"
+		tls {
+			insecure = true
+		}
+	}
+}
+
+otelcol.exporter.loki "default" {
+	forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}
+
+otelcol.exporter.prometheus "default" {
+	forward_to = [prometheus.remote_write.default.receiver]
+}
+
+prometheus.remote_write "default" {
+	endpoint {
+		url = "http://prometheus:9090/api/v1/write"
+	}
+}
