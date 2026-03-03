@@ -1,0 +1,32 @@
+# Local ceiling characterization only. Not default compose-core.
+# Pool budget: (2+1) × (4 API workers + worker + beat + 2 relay) = 24 ≪ Postgres max_connections 100.
+services:
+  billing-api:
+    environment:
+      API_RATE_LIMIT_PER_MINUTE: "0"
+      API_RATE_LIMIT_PLATFORM_ADMIN_PER_MINUTE: "0"
+      OTEL_SDK_DISABLED: "true"
+      UVICORN_WORKERS: "4"
+      DATABASE_POOL_SIZE: "2"
+      DATABASE_MAX_OVERFLOW: "1"
+    command:
+      [
+        "sh",
+        "-c",
+        "uvicorn billing_platform.main:app --host 0.0.0.0 --port 8000 --workers 4 --timeout-graceful-shutdown ${SHUTDOWN_GRACE_SECONDS:-30}",
+      ]
+  billing-worker:
+    environment:
+      OTEL_SDK_DISABLED: "true"
+      DATABASE_POOL_SIZE: "2"
+      DATABASE_MAX_OVERFLOW: "1"
+  billing-beat:
+    environment:
+      OTEL_SDK_DISABLED: "true"
+      DATABASE_POOL_SIZE: "2"
+      DATABASE_MAX_OVERFLOW: "1"
+  outbox-relay:
+    environment:
+      OTEL_SDK_DISABLED: "true"
+      DATABASE_POOL_SIZE: "2"
+      DATABASE_MAX_OVERFLOW: "1"
